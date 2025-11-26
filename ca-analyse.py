@@ -6,106 +6,103 @@ from typing import Any, Dict, List
 
 
 def load_json(path: str) -> Any:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"ERROR: failed to read JSON from {path}: {e}", file=sys.stderr)
-        sys.exit(1)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def match_patterns(subject: str, patterns: List[str]) -> List[str]:
-    s = subject.lower()
-    hits = []
-    for p in patterns:
-        if p and p.lower() in s:
-            hits.append(p)
-    return hits
-
-
-def classify_image(
-    image_entry: Dict[str, Any],
+def classify_cert(
+    subject: str,
     whitelist: List[str],
     blacklist: List[str],
-) -> Dict[str, Any]:
+) -> str:
+    """
+    Return: 'red', 'green', or 'not_matched'
+    - blacklist wins over whitelist if both match
+    """
+    s = subject.lower()
 
-    certs = image_entry.get("certs", []) or []
+    for pat in blacklist:
+        if pat.lower() in s:
+            return "red"
 
-    blacklist_matches = []
-    whitelist_matches = []
-    not_matched = []
+    for pat in whitelist:
+        if pat.lower() in s:
+            return "green"
 
-    # ---- NEW RULE HERE ----
-    # No certs at all = GREEN
-    if len(certs) == 0:
-        return {
-            "image": image_entry.get("image"),
-            "namespaces": image_entry.get("namespaces", []),
-            "status": "GREEN",
-            "blacklist_matches": [],
-            "whitelist_matches": [],
+    return "not_matched"
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Analyse CA usage per image based on policy (whitelist/blacklist).",
+    )
+    p.add_argument(
+        "--images",
+        required=True,
+        help="images.json from ca-nitiser (list of {image,namespaces,certs})",
+    )
+    p.add_argument(
+        "--policy",
+        required=True,
+        help="policy.json with {whitelist: [...], blacklist: [...]}",
+    )
+    p.add_argument(
+        "--out",
+        default="-",
+        help="Output file (default: stdout)",
+    )
+    args = p.parse_args()
+
+    images_data = load_json(args.images)
+    policy = load_json(args.policy)
+
+    whitelist = policy.get("whitelist", [])
+    blacklist = policy.get("blacklist", [])
+
+    report: List[Dict[str, Any]] = []
+
+    for entry in images_data:
+        image = entry.get("image")
+        namespaces = entry.get("namespaces", [])
+        certs_raw = entry.get("certs", [])
+
+        groups = {
+            "green": [],
+            "red": [],
             "not_matched": [],
         }
-    # -----------------------
 
-    for cert in certs:
-        subj = cert.get("subject", "") or ""
-        path = cert.get("path", "") or ""
+        for cert in certs_raw:
+            subj = cert.get("subject", "")
+            cls = classify_cert(subj, whitelist, blacklist)
+            groups[cls].append(cert)
 
-        bl = match_patterns(subj, blacklist)
-        wl = match_patterns(subj, whitelist)
-
-        if bl:
-            for pat in bl:
-                blacklist_matches.append({"pattern": pat, "path": path, "subject": subj})
-        elif wl:
-            for pat in wl:
-                whitelist_matches.append({"pattern": pat, "path": path, "subject": subj})
+        # image-level status
+        if groups["red"]:
+            status = "RED"
+        elif certs_raw and groups["not_matched"]:
+            status = "YELLOW"
         else:
-            not_matched.append({"path": path, "subject": subj})
+            # no certs OR all green
+            status = "GREEN"
 
-    # Status:
-    # RED → any blacklist
-    # GREEN → no blacklist AND some whitelist
-    # YELLOW → otherwise
-    if blacklist_matches:
-        status = "RED"
-    elif whitelist_matches:
-        status = "GREEN"
+        report.append(
+            {
+                "image": image,
+                "namespaces": namespaces,
+                "status": status,
+                "certs": groups,
+            }
+        )
+
+    out_json = json.dumps(report, indent=2)
+
+    if args.out == "-" or args.out == "/dev/stdout":
+        print(out_json)
     else:
-        status = "YELLOW"
-
-    return {
-        "image": image_entry.get("image"),
-        "namespaces": image_entry.get("namespaces", []),
-        "status": status,
-        "blacklist_matches": blacklist_matches,
-        "whitelist_matches": whitelist_matches,
-        "not_matched": not_matched,
-    }
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Analyse certs JSON with whitelist/blacklist.")
-    parser.add_argument("--images", required=True, help="JSON from ca-nitiser.py")
-    parser.add_argument("--policy", required=False, help="policy.json with whitelist/blacklist")
-    args = parser.parse_args()
-
-    images = load_json(args.images)
-
-    if args.policy:
-        pol = load_json(args.policy)
-        whitelist = pol.get("whitelist", []) or []
-        blacklist = pol.get("blacklist", []) or []
-    else:
-        whitelist = ["Let's Encrypt", "ISRG Root X1"]
-        blacklist = ["COMODO", "Comodo", "China", "CNNIC", "TeliaSonera", "Telia Sonera"]
-
-    results = [classify_image(img, whitelist, blacklist) for img in images]
-
-    print(json.dumps(results, indent=2))
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(out_json)
 
 
 if __name__ == "__main__":
     main()
-
