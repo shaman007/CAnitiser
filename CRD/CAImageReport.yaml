@@ -4,13 +4,13 @@ metadata:
   name: caimagereports.security.andreybondarenko.com
 spec:
   group: security.andreybondarenko.com
-  scope: Namespaced
   names:
+    kind: CaImageReport
     plural: caimagereports
     singular: caimagereport
-    kind: CaImageReport
     shortNames:
       - cair
+  scope: Namespaced
   versions:
     - name: v1alpha1
       served: true
@@ -29,11 +29,6 @@ spec:
                       type: string
                     namespace:
                       type: string
-                  description: "Owning CaImageScan"
-            status:
-              type: object
-              properties:
-                # small summary you can use in kubectl get/describe
                 summary:
                   type: object
                   properties:
@@ -45,9 +40,27 @@ spec:
                       type: integer
                     red:
                       type: integer
-                # full JSON from your Python analyzer (report.json)
-                details:
-                  x-kubernetes-preserve-unknown-fields: true
-                  description: "Arbitrary JSON: list of images with status/certs"
-      subresources:
-        status: {}
+                report:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      image:
+                        type: string
+                      namespaces:
+                        type: array
+                        items:
+                          type: string
+                      certs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            path:
+                              type: string
+                            subject:
+                              type: string
+                      status:
+                        type: string
+              # allow extra fields under spec if you add more later
+              x-kubernetes-preserve-unknown-fields: true
