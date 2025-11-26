@@ -58,14 +58,14 @@ def make_job_name(image: str) -> str:
     return f"ca-scan-{h}"
 
 
-def build_init_shell_script() -> str:
+def build_scan_shell_script() -> str:
     """
-    Runs entirely inside the scanner image:
+    Single-container job:
+      - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
+      - umoci unpack --rootless --image /work/oci:scan /work/root
+      - for each cert, print:  path<TAB>subject   to stdout
 
-    - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
-    - umoci unpack --rootless --image /work/oci:scan /work/root
-    - scan /work/root/rootfs/etc/... for certs
-    - write TSV lines "path<TAB>subject" to /scan/output.txt
+    Progress goes to stderr, data to stdout.
     """
     return r"""
 set -e
@@ -74,25 +74,21 @@ IMAGE="${TARGET_IMAGE:?TARGET_IMAGE not set}"
 WORK="/work"
 OCI_DIR="$WORK/oci"
 ROOT_DIR="$WORK/root"
-OUT="/scan/output.txt"
 
 mkdir -p "$OCI_DIR" "$ROOT_DIR"
 
 if ! command -v skopeo >/dev/null 2>&1; then
-  echo "skopeo not found, writing empty output" >&2
-  : > "$OUT"
+  echo "skopeo not found, no scan" >&2
   exit 0
 fi
 
 if ! command -v umoci >/dev/null 2>&1; then
-  echo "umoci not found, writing empty output" >&2
-  : > "$OUT"
+  echo "umoci not found, no scan" >&2
   exit 0
 fi
 
 if ! command -v openssl >/dev/null 2>&1; then
-  echo "openssl not found, writing empty output" >&2
-  : > "$OUT"
+  echo "openssl not found, no scan" >&2
   exit 0
 fi
 
@@ -102,14 +98,12 @@ skopeo copy \
   "docker://$IMAGE" \
   "oci:$OCI_DIR:scan" >/dev/null 2>&1 || {
     echo "skopeo copy failed for $IMAGE" >&2
-    : > "$OUT"
     exit 0
   }
 
 echo "Unpacking image with umoci" >&2
 umoci unpack --rootless --image "$OCI_DIR:scan" "$ROOT_DIR" >/dev/null 2>&1 || {
   echo "umoci unpack failed for $IMAGE" >&2
-  : > "$OUT"
   exit 0
 }
 
@@ -122,19 +116,17 @@ scan_path() {
       sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
       if [ -n "$sub" ]; then
         rel="${f#$ROOTFS}"
-        # TSV: path<TAB>subject
-        printf '%s\t%s\n' "$rel" "$sub" >> "$OUT"
+        # DATA: path<TAB>subject  -> goes to stdout
+        printf '%s\t%s\n' "$rel" "$sub"
       fi
     done
   fi
 }
 
-: > "$OUT"
 for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates; do
   scan_path "$base"
 done
 """
-
 
 
 def create_scan_job(
@@ -143,47 +135,22 @@ def create_scan_job(
     image: str,
     scanner_image: str,
 ) -> str:
+    from kubernetes.client.exceptions import ApiException
+
     name = make_job_name(image)
-    shell_script = build_init_shell_script()
+    shell_script = build_scan_shell_script()
 
-    work_vol = client.V1Volume(
-        name="work",
-        empty_dir=client.V1EmptyDirVolumeSource(),
-    )
-    scan_vol = client.V1Volume(
+    # Single container, no volumes needed
+    scan_container = client.V1Container(
         name="scan",
-        empty_dir=client.V1EmptyDirVolumeSource(),
-    )
-
-    init_container = client.V1Container(
-        name="extractor",
         image=scanner_image,
         command=["/bin/sh", "-c", shell_script],
         env=[client.V1EnvVar(name="TARGET_IMAGE", value=image)],
-        volume_mounts=[
-            client.V1VolumeMount(name="work", mount_path="/work"),
-            client.V1VolumeMount(name="scan", mount_path="/scan"),
-        ],
-    )
-
-    main_container = client.V1Container(
-        name="dump",
-        image=scanner_image,
-        command=[
-            "/bin/sh",
-            "-c",
-            'if [ -f /scan/output.txt ]; then cat /scan/output.txt; fi',
-        ],
-        volume_mounts=[
-            client.V1VolumeMount(name="scan", mount_path="/scan"),
-        ],
     )
 
     pod_spec = client.V1PodSpec(
         restart_policy="Never",
-        init_containers=[init_container],
-        containers=[main_container],
-        volumes=[work_vol, scan_vol],
+        containers=[scan_container],
     )
 
     job = client.V1Job(
@@ -209,7 +176,6 @@ def create_scan_job(
         batch.create_namespaced_job(namespace=scan_ns, body=job)
     except ApiException as e:
         if e.status == 409:
-            # Job already exists -> reuse it
             sys.stderr.write(
                 f"[nitiser] job {name} already exists in {scan_ns}, reusing\n"
             )
@@ -269,7 +235,6 @@ def get_pod_logs(
     except Exception:
         return ""
 
-
 def extract_certs_with_job(
     core: CoreV1Api,
     batch: BatchV1Api,
@@ -286,39 +251,32 @@ def extract_certs_with_job(
         print(f"WARN: no pod for job {job_name} (image {image})", file=sys.stderr)
         return []
 
-    logs = get_pod_logs(core, scan_ns, pod_name, container="dump")
-    
+    # logs from the single 'scan' container
+    logs = get_pod_logs(core, scan_ns, pod_name, container="scan")
+
     if phase != "Complete":
-        ...
+        print(f"WARN: scan job for image {image} ended with phase {phase}", file=sys.stderr)
+        if logs:
+            for line in logs.splitlines()[:20]:
+                print(f"  [scan-log] {line}", file=sys.stderr)
         return []
-    
+
     logs = logs.strip()
     if not logs:
         return []
-    
-    # NEW: strip non-JSON header, keep from first '['
-    idx = logs.find("[")
-    if idx == -1:
-        return []
-    
-    json_text = logs[idx:].strip()
-    
-    try:
-        data = json.loads(json_text)
-        if not isinstance(data, list):
-            return []
-        certs: List[Dict[str, str]] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            path = item.get("path")
-            subj = item.get("subject")
-            if path and subj:
-                certs.append({"path": path, "subject": subj})
-        return certs
-    except Exception as e:
-        print(f"WARN: failed to parse JSON logs for image {image}: {e}", file=sys.stderr)
-        return []
+
+    certs: List[Dict[str, str]] = []
+    for line in logs.splitlines():
+        # skip progress lines like "Pulling image..."
+        if "\t" not in line:
+            continue
+        path, subj = line.split("\t", 1)
+        path = path.strip()
+        subj = subj.strip()
+        if path and subj:
+            certs.append({"path": path, "subject": subj})
+
+    return certs
 
 
 def main() -> None:
