@@ -1,4 +1,4 @@
-# CA Image Scanner for Kubernetes
+# CA Image Scanner for (not only) Kubernetes
 
 This project provides a complete workflow for extracting, analyzing, and reporting CA certificates found inside container images running in a Kubernetes cluster. It is designed for clusters where CA trust hygiene, internal CA usage, or detection of unwanted roots is required.
 
@@ -194,7 +194,7 @@ spec:
 ```
 ### Non Kubernetes use
 
-## Scanner
+## Local scanner
 
 Since we are not in the K8S, we can use kubectl and local authenticaton. The test.sh script does the scan of the
 cluster, generates .json and fancy .html reports.
