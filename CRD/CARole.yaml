@@ -13,9 +13,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]        # exec uses "create" on the exec subresource
   - apiGroups: ["security.andreybondarenko.com"]
     resources: ["caimagereports"]
     verbs: ["create", "update", "patch", "get", "list"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

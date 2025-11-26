@@ -3,9 +3,9 @@ import argparse
 import json
 import subprocess
 import sys
-from collections import defaultdict
-from typing import Dict, List, Tuple, Any
-
+import time
+import hashlib
+from typing import Dict, List, Any
 
 CONFIG = {
     "kubectl_cmd": ["kubectl"],
@@ -14,23 +14,25 @@ CONFIG = {
         "/etc/pki",
         "/usr/local/share/ca-certificates",
     ],
+    # namespace where ephemeral scan pods will run
+    "scan_namespace": "ca-scanner",
 }
 
 
-def run(cmd: List[str]) -> subprocess.CompletedProcess:
+def run(cmd: List[str], input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
+        input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
 
-def get_images_and_pods(kubectl_cmd: List[str]) -> Dict[str, Dict[str, Any]]:
+def get_images_and_namespaces(kubectl_cmd: List[str]) -> Dict[str, Any]:
     """
     Returns mapping:
       image -> {
-        "namespaces": set([...]),
-        "example": (namespace, pod_name, container_name)
+        "namespaces": set([...])
       }
     """
     cmd = kubectl_cmd + ["get", "pods", "-A", "-o", "json"]
@@ -40,25 +42,19 @@ def get_images_and_pods(kubectl_cmd: List[str]) -> Dict[str, Dict[str, Any]]:
         sys.exit(1)
 
     data = json.loads(proc.stdout.decode() or "{}")
-    images: Dict[str, Dict[str, Any]] = {}
+    images: Dict[str, Any] = {}
 
     for item in data.get("items", []):
         meta = item.get("metadata", {})
         spec = item.get("spec", {})
         ns = meta.get("namespace", "default")
-        pod_name = meta.get("name", "")
 
-        def handle_containers(container_list_key: str):
-            for c in spec.get(container_list_key, []) or []:
+        def handle_containers(key: str):
+            for c in spec.get(key, []) or []:
                 image = c.get("image")
-                cname = c.get("name", "container")
                 if not image:
                     continue
-                if image not in images:
-                    images[image] = {
-                        "namespaces": set(),
-                        "example": (ns, pod_name, cname),
-                    }
+                images.setdefault(image, {"namespaces": set()})
                 images[image]["namespaces"].add(ns)
 
         handle_containers("containers")
@@ -68,21 +64,25 @@ def get_images_and_pods(kubectl_cmd: List[str]) -> Dict[str, Dict[str, Any]]:
     return images
 
 
-def extract_certs_via_exec(
-    kubectl_cmd: List[str],
-    namespace: str,
-    pod: str,
-    container: str,
-    ca_paths: List[str],
-) -> List[Dict[str, str]]:
-    """
-    Run openssl in a real pod/container that uses the image.
+def make_pod_name(image: str) -> str:
+    h = hashlib.sha1(image.encode("utf-8")).hexdigest()[:8]
+    return f"ca-scan-{h}"
 
-    Returns list of {path, subject}.
+
+def create_scan_pod(
+    kubectl_cmd: List[str],
+    scan_ns: str,
+    image: str,
+    ca_paths: List[str],
+) -> str:
     """
+    Create a temporary pod in scan_ns that runs `sh -c <script>` inside the image.
+    Returns pod name.
+    """
+    pod_name = make_pod_name(image)
     ca_paths_arg = " ".join(ca_paths)
 
-    script = f"""
+    shell_script = f"""
 set -e
 for base in {ca_paths_arg}; do
   if [ -d "$base" ]; then
@@ -96,36 +96,115 @@ for base in {ca_paths_arg}; do
 done
 """
 
-    cmd = kubectl_cmd + [
-        "exec",
-        "-n",
-        namespace,
-        pod,
-        "-c",
-        container,
-        "--",
-        "sh",
-        "-c",
-        script,
-    ]
+    # Pod manifest
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "namespace": scan_ns,
+            "labels": {
+                "app": "ca-scan",
+            },
+        },
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "scan",
+                    "image": image,
+                    "command": ["sh", "-c", shell_script],
+                }
+            ],
+        },
+    }
 
-    proc = run(cmd)
+    manifest_yaml = json_to_yaml(manifest)
+    proc = run(kubectl_cmd + ["apply", "-f", "-"], input_bytes=manifest_yaml.encode("utf-8"))
     if proc.returncode != 0:
-        # pod may not have sh/openssl/etc.
+        # Failed to create pod -> treat as no certs
+        # print for debug if needed:
+        # print(proc.stderr.decode(), file=sys.stderr)
+        return ""
+
+    return pod_name
+
+
+def json_to_yaml(obj: Any) -> str:
+    """
+    Very small JSON->YAML for our simple manifest, to avoid adding pyyaml.
+    Good enough for this structure.
+    """
+    # we cheat: kubectl happily accepts JSON as YAML when passed with -f -.
+    # So we just return JSON string.
+    return json.dumps(obj)
+
+
+def wait_for_pod_done(kubectl_cmd: List[str], scan_ns: str, pod_name: str, timeout_sec: int = 120) -> str:
+    """
+    Wait until pod phase is Succeeded or Failed, or timeout.
+    Returns phase string (Succeeded/Failed/Unknown/Timeout)
+    """
+    start = time.time()
+    while True:
+        if time.time() - start > timeout_sec:
+            return "Timeout"
+
+        proc = run(kubectl_cmd + ["get", "pod", pod_name, "-n", scan_ns, "-o", "json"])
+        if proc.returncode != 0:
+            # Pod might not exist yet or already deleted
+            time.sleep(2)
+            continue
+
+        data = json.loads(proc.stdout.decode() or "{}")
+        phase = data.get("status", {}).get("phase", "Unknown")
+        if phase in ("Succeeded", "Failed"):
+            return phase
+
+        time.sleep(2)
+
+
+def get_pod_logs(kubectl_cmd: List[str], scan_ns: str, pod_name: str) -> str:
+    proc = run(kubectl_cmd + ["logs", "-n", scan_ns, pod_name])
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.decode()
+
+
+def delete_pod(kubectl_cmd: List[str], scan_ns: str, pod_name: str) -> None:
+    run(kubectl_cmd + ["delete", "pod", pod_name, "-n", scan_ns, "--ignore-not-found=true"])
+
+
+def extract_certs_with_ephemeral_pod(
+    kubectl_cmd: List[str],
+    scan_ns: str,
+    image: str,
+    ca_paths: List[str],
+) -> List[Dict[str, str]]:
+    pod_name = create_scan_pod(kubectl_cmd, scan_ns, image, ca_paths)
+    if not pod_name:
         return []
 
-    certs: List[Dict[str, str]] = []
-    for line in proc.stdout.decode().splitlines():
-        if "\t" not in line:
-            continue
-        path, subject = line.split("\t", 1)
-        certs.append({"path": path, "subject": subject})
-    return certs
+    try:
+        phase = wait_for_pod_done(kubectl_cmd, scan_ns, pod_name)
+        if phase != "Succeeded":
+            return []
+
+        logs = get_pod_logs(kubectl_cmd, scan_ns, pod_name)
+        certs: List[Dict[str, str]] = []
+        for line in logs.splitlines():
+            if "\t" not in line:
+                continue
+            path, subject = line.split("\t", 1)
+            certs.append({"path": path, "subject": subject})
+        return certs
+    finally:
+        delete_pod(kubectl_cmd, scan_ns, pod_name)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract CA certificates from K8S images via kubectl exec → JSON output",
+        description="Extract CA certificates from K8S images using ephemeral pods → JSON output",
     )
     parser.add_argument(
         "--kubectl",
@@ -133,23 +212,27 @@ def main() -> None:
         default=CONFIG["kubectl_cmd"],
         help="kubectl command (default: %(default)s)",
     )
+    parser.add_argument(
+        "--scan-namespace",
+        default=CONFIG["scan_namespace"],
+        help="Namespace in which ephemeral scan pods will run (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     kubectl_cmd = args.kubectl
     ca_paths = CONFIG["ca_paths"]
+    scan_ns = args.scan_namespace
 
-    images_info = get_images_and_pods(kubectl_cmd)
+    images_info = get_images_and_namespaces(kubectl_cmd)
 
     result = []
     for image, info in sorted(images_info.items(), key=lambda kv: kv[0]):
         ns_set = info["namespaces"]
-        example_ns, example_pod, example_container = info["example"]
 
-        certs = extract_certs_via_exec(
+        certs = extract_certs_with_ephemeral_pod(
             kubectl_cmd,
-            example_ns,
-            example_pod,
-            example_container,
+            scan_ns,
+            image,
             ca_paths,
         )
 
