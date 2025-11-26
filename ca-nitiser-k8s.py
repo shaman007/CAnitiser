@@ -59,6 +59,14 @@ def make_job_name(image: str) -> str:
 
 
 def build_init_shell_script() -> str:
+    """
+    Runs entirely inside the scanner image:
+
+    - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
+    - umoci unpack --rootless --image /work/oci:scan /work/root
+    - scan /work/root/rootfs/etc/... for certs
+    - write TSV lines "path<TAB>subject" to /scan/output.txt
+    """
     return r"""
 set -e
 
@@ -66,25 +74,25 @@ IMAGE="${TARGET_IMAGE:?TARGET_IMAGE not set}"
 WORK="/work"
 OCI_DIR="$WORK/oci"
 ROOT_DIR="$WORK/root"
-OUT="/scan/output.json"
+OUT="/scan/output.txt"
 
 mkdir -p "$OCI_DIR" "$ROOT_DIR"
 
 if ! command -v skopeo >/dev/null 2>&1; then
-  echo "skopeo not found, writing empty JSON" >&2
-  echo "[]" > "$OUT"
+  echo "skopeo not found, writing empty output" >&2
+  : > "$OUT"
   exit 0
 fi
 
 if ! command -v umoci >/dev/null 2>&1; then
-  echo "umoci not found, writing empty JSON" >&2
-  echo "[]" > "$OUT"
+  echo "umoci not found, writing empty output" >&2
+  : > "$OUT"
   exit 0
 fi
 
 if ! command -v openssl >/dev/null 2>&1; then
-  echo "openssl not found, writing empty JSON" >&2
-  echo "[]" > "$OUT"
+  echo "openssl not found, writing empty output" >&2
+  : > "$OUT"
   exit 0
 fi
 
@@ -94,21 +102,18 @@ skopeo copy \
   "docker://$IMAGE" \
   "oci:$OCI_DIR:scan" >/dev/null 2>&1 || {
     echo "skopeo copy failed for $IMAGE" >&2
-    echo "[]" > "$OUT"
+    : > "$OUT"
     exit 0
   }
 
 echo "Unpacking image with umoci" >&2
 umoci unpack --rootless --image "$OCI_DIR:scan" "$ROOT_DIR" >/dev/null 2>&1 || {
   echo "umoci unpack failed for $IMAGE" >&2
-  echo "[]" > "$OUT"
+  : > "$OUT"
   exit 0
 }
 
 ROOTFS="$ROOT_DIR/rootfs"
-
-echo "[" > "$OUT"
-FIRST=1
 
 scan_path() {
   base="$1"
@@ -117,20 +122,19 @@ scan_path() {
       sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
       if [ -n "$sub" ]; then
         rel="${f#$ROOTFS}"
-        if [ "$FIRST" -eq 0 ]; then echo "," >> "$OUT"; fi
-        FIRST=0
-        printf '{"path": "%s", "subject": "%s"}' "$rel" "$sub" >> "$OUT"
+        # TSV: path<TAB>subject
+        printf '%s\t%s\n' "$rel" "$sub" >> "$OUT"
       fi
     done
   fi
 }
 
+: > "$OUT"
 for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates; do
   scan_path "$base"
 done
-
-echo "]" >> "$OUT"
 """
+
 
 
 def create_scan_job(
@@ -166,11 +170,7 @@ def create_scan_job(
     main_container = client.V1Container(
         name="dump",
         image=scanner_image,
-        command=[
-            "/bin/sh",
-            "-c",
-            'if [ -f /scan/output.json ]; then cat /scan/output.json; else echo "[]"; fi',
-        ],
+        command=["/bin/sh", "-c", 'if [ -f /scan/output.txt ]; then cat /scan/output.txt; fi'],
         volume_mounts=[
             client.V1VolumeMount(name="scan", mount_path="/scan"),
         ],
