@@ -12,6 +12,7 @@ spec:
         - name: scanner
           image: harbor.andreybondarenko.com/library/canitiser:latest
           command: ["/bin/sh", "-c"]
+#Add --namespace name if you want to limit scan to specific namespace
           args:
             - |
               set -e
@@ -19,7 +20,6 @@ spec:
               echo "[controller] running ca-nitiser-k8s" >&2
               python /app/ca-nitiser-k8s.py \
                 --scan-namespace ca-scanner \
-                --namespace mail \
                 --scanner-image harbor.andreybondarenko.com/library/canister-base:latest \
                 > /work/images.json
 
@@ -35,9 +35,9 @@ spec:
               echo "[controller] running push-report" >&2
               python /app/push-report.py \
                 --report-json /work/report.json \
-                --report-name ca-scan-mail-report \
+                --report-name ca-scan-cluster-report \
                 --report-namespace ca-scanner \
-                --scan-name ca-scan-mail \
+                --scan-name ca-scan-cluster \
                 --scan-namespace ca-scanner
 
           volumeMounts:
