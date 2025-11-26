@@ -178,25 +178,30 @@ def extract_certs_with_job(
     shell_script = build_shell_script(ca_paths)
     job_name = create_scan_job(batch, scan_ns, image, shell_script)
 
-    try:
-        phase = wait_for_job(batch, scan_ns, job_name)
-        if phase != "Complete":
-            return []
+    phase = "Unknown"
+    phase = wait_for_job(batch, scan_ns, job_name)
 
-        pod_name = get_job_pod_name(core, scan_ns, job_name)
-        if not pod_name:
-            return []
+    pod_name = get_job_pod_name(core, scan_ns, job_name)
+    if not pod_name:
+        print(f"WARN: no pod for job {job_name} (image {image})", file=sys.stderr)
+        return []
 
-        logs = get_pod_logs(core, scan_ns, pod_name)
-        certs: List[Dict[str, str]] = []
-        for line in logs.splitlines():
-            if "\t" not in line:
-                continue
-            path, subject = line.split("\t", 1)
-            certs.append({"path": path, "subject": subject})
-        return certs
-    finally:
-        delete_job(batch, scan_ns, job_name)
+    logs = get_pod_logs(core, scan_ns, pod_name)
+
+    if phase != "Complete":
+        print(f"WARN: scan job for image {image} ended with phase {phase}", file=sys.stderr)
+        if logs:
+            for line in logs.splitlines()[:20]:
+                print(f"  [scan-log] {line}", file=sys.stderr)
+        return []
+
+    certs: List[Dict[str, str]] = []
+    for line in logs.splitlines():
+        if "\t" not in line:
+            continue
+        path, subject = line.split("\t", 1)
+        certs.append({"path": path, "subject": subject})
+    return certs
 
 
 def main() -> None:
