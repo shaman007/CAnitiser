@@ -1,70 +1,56 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import subprocess
-import sys
 import time
 import hashlib
 from typing import Dict, List, Any, Optional
 
-CONFIG = {
-    "kubectl_cmd": ["kubectl"],
-    "ca_paths": [
-        "/etc/ssl/certs",
-        "/etc/pki",
-        "/usr/local/share/ca-certificates",
-    ],
-    # namespace where scan Jobs will run
-    "scan_namespace": "ca-scanner",
-}
+from kubernetes import client, config
+from kubernetes.client import CoreV1Api, BatchV1Api
 
 
-def run(cmd: List[str], input_bytes: Optional[bytes] = None) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        cmd,
-        input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+CA_PATHS_DEFAULT = [
+    "/etc/ssl/certs",
+    "/etc/pki",
+    "/usr/local/share/ca-certificates",
+]
+
+
+def load_k8s() -> tuple[CoreV1Api, BatchV1Api]:
+    # in-cluster config
+    config.load_incluster_config()
+    return client.CoreV1Api(), client.BatchV1Api()
 
 
 def get_images_and_namespaces(
-    kubectl_cmd: List[str],
+    core: CoreV1Api,
     scope_namespace: Optional[str],
 ) -> Dict[str, Any]:
     """
-    Returns:
-      image -> {"namespaces": set([...])}
+    image -> { "namespaces": set([...]) }
     """
     if scope_namespace:
-        cmd = kubectl_cmd + ["get", "pods", "-n", scope_namespace, "-o", "json"]
+        pods = core.list_namespaced_pod(scope_namespace)
     else:
-        cmd = kubectl_cmd + ["get", "pods", "-A", "-o", "json"]
+        pods = core.list_pod_for_all_namespaces()
 
-    proc = run(cmd)
-    if proc.returncode != 0:
-        print("ERROR: kubectl get pods failed:", proc.stderr.decode(), file=sys.stderr)
-        sys.exit(1)
-
-    data = json.loads(proc.stdout.decode() or "{}")
     images: Dict[str, Any] = {}
 
-    for item in data.get("items", []):
-        meta = item.get("metadata", {})
-        spec = item.get("spec", {})
-        ns = meta.get("namespace", "default")
+    for p in pods.items:
+        ns = p.metadata.namespace
+        spec = p.spec or {}
 
-        def handle_containers(key: str):
-            for c in spec.get(key, []) or []:
-                image = c.get("image")
-                if not image:
+        def handle(cont_list):
+            for c in cont_list or []:
+                img = c.image
+                if not img:
                     continue
-                images.setdefault(image, {"namespaces": set()})
-                images[image]["namespaces"].add(ns)
+                images.setdefault(img, {"namespaces": set()})
+                images[img]["namespaces"].add(ns)
 
-        handle_containers("containers")
-        handle_containers("initContainers")
-        handle_containers("ephemeralContainers")
+        handle(spec.containers)
+        handle(spec.init_containers)
+        handle(getattr(spec, "ephemeral_containers", None))
 
     return images
 
@@ -74,25 +60,9 @@ def make_job_name(image: str) -> str:
     return f"ca-scan-{h}"
 
 
-def json_to_yaml(obj: Any) -> str:
-    # kubectl accepts JSON as YAML via -f -, so we can just dump JSON
-    return json.dumps(obj)
-
-
-def create_scan_job(
-    kubectl_cmd: List[str],
-    scan_ns: str,
-    image: str,
-    ca_paths: List[str],
-) -> str:
-    """
-    Create a Job that runs the image, prints certs to stdout.
-    Returns job name or "" on failure.
-    """
-    job_name = make_job_name(image)
+def build_shell_script(ca_paths: List[str]) -> str:
     ca_paths_arg = " ".join(ca_paths)
-
-    shell_script = f"""
+    return f"""
 set -e
 for base in {ca_paths_arg}; do
   if [ -d "$base" ]; then
@@ -106,147 +76,118 @@ for base in {ca_paths_arg}; do
 done
 """
 
-    job_manifest = {
-        "apiVersion": "batch/v1",
-        "kind": "Job",
-        "metadata": {
-            "name": job_name,
-            "namespace": scan_ns,
-            "labels": {
-                "app": "ca-scan",
-            },
-        },
-        "spec": {
-            "backoffLimit": 0,
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "job-name": job_name,
-                    },
-                },
-                "spec": {
-                    "restartPolicy": "Never",
-                    "containers": [
-                        {
-                            "name": "scan",
-                            "image": image,
-                            "command": ["sh", "-c", shell_script],
-                        }
+
+def create_scan_job(
+    batch: BatchV1Api,
+    scan_ns: str,
+    image: str,
+    shell_script: str,
+) -> str:
+    name = make_job_name(image)
+
+    job = client.V1Job(
+        api_version="batch/v1",
+        kind="Job",
+        metadata=client.V1ObjectMeta(
+            name=name,
+            namespace=scan_ns,
+            labels={"app": "ca-scan"},
+        ),
+        spec=client.V1JobSpec(
+            backoff_limit=0,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={"job-name": name, "app": "ca-scan"},
+                ),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    containers=[
+                        client.V1Container(
+                            name="scan",
+                            image=image,
+                            command=["sh", "-c", shell_script],
+                        )
                     ],
-                },
-            },
-        },
-    }
-
-    manifest_yaml = json_to_yaml(job_manifest)
-    proc = run(
-        kubectl_cmd + ["apply", "-f", "-"],
-        input_bytes=manifest_yaml.encode("utf-8"),
+                ),
+            ),
+        ),
     )
-    if proc.returncode != 0:
-        # print(proc.stderr.decode(), file=sys.stderr)
-        return ""
-    return job_name
+
+    batch.create_namespaced_job(namespace=scan_ns, body=job)
+    return name
 
 
-def wait_for_job_done(
-    kubectl_cmd: List[str],
+def wait_for_job(
+    batch: BatchV1Api,
     scan_ns: str,
     job_name: str,
     timeout_sec: int = 180,
 ) -> str:
     """
-    Wait for Job to complete or fail.
-    Returns "Complete", "Failed", "Timeout", or "Unknown".
+    Return "Complete", "Failed", "Timeout".
     """
     start = time.time()
     while True:
         if time.time() - start > timeout_sec:
             return "Timeout"
 
-        proc = run(
-            kubectl_cmd
-            + ["get", "job", job_name, "-n", scan_ns, "-o", "json"]
-        )
-        if proc.returncode != 0:
-            # maybe not created yet or already gone
-            time.sleep(2)
-            continue
-
-        data = json.loads(proc.stdout.decode() or "{}")
-        conditions = data.get("status", {}).get("conditions", []) or []
-        conds = {c.get("type"): c.get("status") for c in conditions}
+        job = batch.read_namespaced_job(name=job_name, namespace=scan_ns)
+        conds = {c.type: c.status for c in (job.status.conditions or [])}
         if conds.get("Complete") == "True":
             return "Complete"
         if conds.get("Failed") == "True":
             return "Failed"
-
         time.sleep(2)
 
 
-def get_job_pod_name(
-    kubectl_cmd: List[str],
-    scan_ns: str,
-    job_name: str,
-) -> Optional[str]:
-    proc = run(
-        kubectl_cmd
-        + ["get", "pods", "-n", scan_ns, "-l", f"job-name={job_name}", "-o", "json"]
+def get_job_pod_name(core: CoreV1Api, scan_ns: str, job_name: str) -> Optional[str]:
+    pods = core.list_namespaced_pod(
+        namespace=scan_ns,
+        label_selector=f"job-name={job_name}",
     )
-    if proc.returncode != 0:
+    if not pods.items:
         return None
-    data = json.loads(proc.stdout.decode() or "{}")
-    items = data.get("items", [])
-    if not items:
-        return None
-    return items[0].get("metadata", {}).get("name")
+    return pods.items[0].metadata.name
 
 
-def get_pod_logs(
-    kubectl_cmd: List[str],
-    scan_ns: str,
-    pod_name: str,
-) -> str:
-    proc = run(
-        kubectl_cmd
-        + ["logs", "-n", scan_ns, pod_name]
+def get_pod_logs(core: CoreV1Api, scan_ns: str, pod_name: str) -> str:
+    return core.read_namespaced_pod_log(name=pod_name, namespace=scan_ns) or ""
+
+
+def delete_job(batch: BatchV1Api, scan_ns: str, job_name: str) -> None:
+    propagation = client.V1DeleteOptions(
+        propagation_policy="Foreground",
     )
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout.decode()
-
-
-def delete_job(
-    kubectl_cmd: List[str],
-    scan_ns: str,
-    job_name: str,
-) -> None:
-    run(
-        kubectl_cmd
-        + ["delete", "job", job_name, "-n", scan_ns, "--ignore-not-found=true"]
-    )
+    try:
+        batch.delete_namespaced_job(
+            name=job_name,
+            namespace=scan_ns,
+            body=propagation,
+        )
+    except Exception:
+        pass
 
 
 def extract_certs_with_job(
-    kubectl_cmd: List[str],
+    core: CoreV1Api,
+    batch: BatchV1Api,
     scan_ns: str,
     image: str,
     ca_paths: List[str],
 ) -> List[Dict[str, str]]:
-    job_name = create_scan_job(kubectl_cmd, scan_ns, image, ca_paths)
-    if not job_name:
-        return []
+    shell_script = build_shell_script(ca_paths)
+    job_name = create_scan_job(batch, scan_ns, image, shell_script)
 
     try:
-        phase = wait_for_job_done(kubectl_cmd, scan_ns, job_name)
+        phase = wait_for_job(batch, scan_ns, job_name)
         if phase != "Complete":
             return []
 
-        pod_name = get_job_pod_name(kubectl_cmd, scan_ns, job_name)
+        pod_name = get_job_pod_name(core, scan_ns, job_name)
         if not pod_name:
             return []
 
-        logs = get_pod_logs(kubectl_cmd, scan_ns, pod_name)
+        logs = get_pod_logs(core, scan_ns, pod_name)
         certs: List[Dict[str, str]] = []
         for line in logs.splitlines():
             if "\t" not in line:
@@ -255,48 +196,43 @@ def extract_certs_with_job(
             certs.append({"path": path, "subject": subject})
         return certs
     finally:
-        delete_job(kubectl_cmd, scan_ns, job_name)
+        delete_job(batch, scan_ns, job_name)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract CA certificates from K8S images using per-image Jobs → JSON",
-    )
-    parser.add_argument(
-        "--kubectl",
-        nargs="+",
-        default=CONFIG["kubectl_cmd"],
-        help="kubectl command (default: %(default)s)",
+        description="Extract CA certificates from K8S images using per-image Jobs (no kubectl).",
     )
     parser.add_argument(
         "--scan-namespace",
-        default=CONFIG["scan_namespace"],
-        help="Namespace to create scan Jobs in (default: %(default)s)",
+        default="ca-scanner",
+        help="Namespace to create scan Jobs in (default: ca-scanner)",
     )
     parser.add_argument(
         "--namespace",
         default=None,
-        help="Limit scan to a single namespace (default: all namespaces)",
+        help="Limit discovery to a single namespace (default: all namespaces)",
+    )
+    parser.add_argument(
+        "--ca-path",
+        action="append",
+        dest="ca_paths",
+        help="Extra CA search path (can be repeated).",
     )
     args = parser.parse_args()
 
-    kubectl_cmd = args.kubectl
-    ca_paths = CONFIG["ca_paths"]
-    scan_ns = args.scan_namespace
-    scope_ns = args.namespace
+    ca_paths = CA_PATHS_DEFAULT.copy()
+    if args.ca_paths:
+        ca_paths.extend(args.ca_paths)
 
-    images_info = get_images_and_namespaces(kubectl_cmd, scope_ns)
+    core, batch = load_k8s()
+
+    images_info = get_images_and_namespaces(core, args.namespace)
 
     result = []
     for image, info in sorted(images_info.items(), key=lambda kv: kv[0]):
         ns_set = info["namespaces"]
-
-        certs = extract_certs_with_job(
-            kubectl_cmd,
-            scan_ns,
-            image,
-            ca_paths,
-        )
+        certs = extract_certs_with_job(core, batch, args.scan_namespace, image, ca_paths)
 
         result.append(
             {
