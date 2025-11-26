@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from kubernetes import client, config
 from kubernetes.client import CoreV1Api, BatchV1Api
-
+from kubernetes.client.exceptions import ApiException
 
 SCAN_NAMESPACE_DEFAULT = "ca-scanner"
 SCANNER_IMAGE_DEFAULT = "harbor.andreybondarenko.com/library/ca-scanner-base:latest"
@@ -146,7 +146,6 @@ def create_scan_job(
     name = make_job_name(image)
     shell_script = build_init_shell_script()
 
-    # Volumes: shared work + scan data
     work_vol = client.V1Volume(
         name="work",
         empty_dir=client.V1EmptyDirVolumeSource(),
@@ -170,7 +169,11 @@ def create_scan_job(
     main_container = client.V1Container(
         name="dump",
         image=scanner_image,
-        command=["/bin/sh", "-c", 'if [ -f /scan/output.txt ]; then cat /scan/output.txt; fi'],
+        command=[
+            "/bin/sh",
+            "-c",
+            'if [ -f /scan/output.txt ]; then cat /scan/output.txt; fi',
+        ],
         volume_mounts=[
             client.V1VolumeMount(name="scan", mount_path="/scan"),
         ],
@@ -202,8 +205,19 @@ def create_scan_job(
         ),
     )
 
-    batch.create_namespaced_job(namespace=scan_ns, body=job)
+    try:
+        batch.create_namespaced_job(namespace=scan_ns, body=job)
+    except ApiException as e:
+        if e.status == 409:
+            # Job already exists -> reuse it
+            sys.stderr.write(
+                f"[nitiser] job {name} already exists in {scan_ns}, reusing\n"
+            )
+        else:
+            raise
+
     return name
+
 
 
 def wait_for_job(
