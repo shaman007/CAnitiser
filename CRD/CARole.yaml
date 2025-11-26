@@ -26,7 +26,7 @@ rules:
     verbs: ["create", "get", "list", "watch", "delete"]
 
   # (Optional) if your Python will also create CaImageReport via API
-  - apiGroups: ["security.example.com"]
+  - apiGroups: ["security.andreybondarenko.com"]
     resources: ["caimagereports"]
     verbs: ["create", "update", "patch", "get", "list"]
 ---

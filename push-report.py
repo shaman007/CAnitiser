@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from kubernetes import client, config
 from kubernetes.client import CustomObjectsApi
 from kubernetes.client.exceptions import ApiException
 
 
+# Adjust these to match your CRD
 GROUP = "security.andreybondarenko.com"
 VERSION = "v1alpha1"
 PLURAL = "caimagereports"
 
 
 def load_k8s() -> CustomObjectsApi:
-    # in-cluster
     config.load_incluster_config()
     return client.CustomObjectsApi()
 
@@ -70,6 +71,9 @@ def upsert_report(
             raise
 
     if exists:
+        sys.stderr.write(
+            f"[push-report] patching existing {PLURAL}/{name} in {namespace}\n"
+        )
         api.patch_namespaced_custom_object(
             group=GROUP,
             version=VERSION,
@@ -79,6 +83,9 @@ def upsert_report(
             body={"spec": spec},
         )
     else:
+        sys.stderr.write(
+            f"[push-report] creating new {PLURAL}/{name} in {namespace}\n"
+        )
         api.create_namespaced_custom_object(
             group=GROUP,
             version=VERSION,
@@ -98,4 +105,19 @@ def main() -> None:
     args = p.parse_args()
 
     with open(args.report_json, "r", encoding="utf-8") as f:
-        report = json.load
+        report = json.load(f)
+
+    api = load_k8s()
+    upsert_report(
+        api=api,
+        name=args.report_name,
+        namespace=args.report_namespace,
+        scan_name=args.scan_name,
+        scan_namespace=args.scan_namespace,
+        report=report,
+    )
+    sys.stderr.write("[push-report] done\n")
+
+
+if __name__ == "__main__":
+    main()
