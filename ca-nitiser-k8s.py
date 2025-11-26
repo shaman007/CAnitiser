@@ -331,9 +331,13 @@ def main() -> None:
     core, batch = load_k8s()
     images_info = get_images_and_namespaces(core, args.namespace)
 
+    # debug to stderr so you see what it found
+    sys.stderr.write(f"[nitiser] found {len(images_info)} unique images\n")
+
     result = []
     for image, info in sorted(images_info.items(), key=lambda kv: kv[0]):
         ns_set = info["namespaces"]
+        sys.stderr.write(f"[nitiser] scanning image: {image}\n")
 
         certs = extract_certs_with_job(
             core=core,
@@ -341,6 +345,10 @@ def main() -> None:
             scan_ns=args.scan_namespace,
             image=image,
             scanner_image=args.scanner_image,
+        )
+
+        sys.stderr.write(
+            f"[nitiser] image {image}: {len(certs)} certs\n"
         )
 
         result.append(
@@ -351,6 +359,7 @@ def main() -> None:
             }
         )
 
+    # ✔ always print JSON to stdout
     print(json.dumps(result, indent=2))
 
 
