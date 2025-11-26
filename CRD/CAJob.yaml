@@ -16,54 +16,22 @@ spec:
             - |
               set -e
 
-              # 1) discover images & run per-image Jobs
-              python /app/ca-nitiser-k8s.py > /work/images.json
+              python /app/ca-nitiser-k8s.py \
+                --scan-namespace ca-scanner \
+                > /work/images.json
 
-              # 2) analyse with policy
               python /app/ca-analyse.py \
                 --images /work/images.json \
                 --policy /policy/policy.json \
                 > /work/report.json
 
-              # 3) create/update CaImageReport via API-server YAML
-              python - << 'EOF'
-              import json, subprocess
-              
-              NS = "ca-scanner"
-              SCAN_NAME = "ca-scan-cluster"
-              REPORT_PATH = "/work/report.json"
-              
-              with open(REPORT_PATH, "r", encoding="utf-8") as f:
-                  report = json.load(f)
-              
-              total = len(report)
-              green = sum(1 for x in report if x.get("status") == "GREEN")
-              yellow = sum(1 for x in report if x.get("status") == "YELLOW")
-              red = sum(1 for x in report if x.get("status") == "RED")
-              
-              yaml_text = f"""apiVersion: security.example.com/v1alpha1
-              kind: CaImageReport
-              metadata:
-                name: ca-scan-cluster-report
-                namespace: {NS}
-              spec:
-                scanRef:
-                  name: {SCAN_NAME}
-                  namespace: {NS}
-                summary:
-                  totalImages: {total}
-                  green: {green}
-                  yellow: {yellow}
-                  red: {red}
-                report: {json.dumps(report)}
-              """
-              
-              # still using kubectl HERE? if you really must not, replace this with python k8s client too.
-              subprocess.check_call(
-                  ["kubectl", "apply", "-f", "-"],
-                  input=yaml_text.encode("utf-8")
-              )
-              EOF
+              python /app/push-report.py \
+                --report-json /work/report.json \
+                --report-name ca-scan-cluster-report \
+                --report-namespace ca-scanner \
+                --scan-name ca-scan-cluster \
+                --scan-namespace ca-scanner
+
           volumeMounts:
             - name: policy
               mountPath: /policy

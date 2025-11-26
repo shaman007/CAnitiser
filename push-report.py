@@ -6,7 +6,7 @@ from kubernetes.client import CustomObjectsApi
 from kubernetes.client.exceptions import ApiException
 
 
-GROUP = "security.example.com"
+GROUP = "security.andreybondarenko.com"
 VERSION = "v1alpha1"
 PLURAL = "caimagereports"
 
