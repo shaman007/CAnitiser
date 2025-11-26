@@ -29,7 +29,7 @@ RUN set -eux; \
 # RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy scanner/analyzer/report generator scripts
-COPY ca-nitiser.py ca-analyse.py ca-report-html.py push-report.py ./ 
+COPY ca-nitiser-k8s.py ca-analyse.py ca-report-html.py push-report.py ./ 
 
 # Non-root user
 RUN useradd -r -u 10001 -g users scanner && \
