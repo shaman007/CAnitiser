@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 import argparse
-import json
-import time
 import hashlib
-from typing import Dict, List, Any, Optional
+import json
+import sys
+import time
+from typing import Any, Dict, List, Optional
 
 from kubernetes import client, config
 from kubernetes.client import CoreV1Api, BatchV1Api
 
 
-CA_PATHS_DEFAULT = [
-    "/etc/ssl/certs",
-    "/etc/pki",
-    "/usr/local/share/ca-certificates",
-]
+SCAN_NAMESPACE_DEFAULT = "ca-scanner"
+SCANNER_IMAGE_DEFAULT = "harbor.andreybondarenko.com/library/ca-scanner-base:latest"
 
 
 def load_k8s() -> tuple[CoreV1Api, BatchV1Api]:
-    # in-cluster config
+    # In-cluster config
     config.load_incluster_config()
     return client.CoreV1Api(), client.BatchV1Api()
 
@@ -56,24 +54,94 @@ def get_images_and_namespaces(
 
 
 def make_job_name(image: str) -> str:
-    h = hashlib.sha1(image.encode("utf-8")).hexdigest()[:8]
+    h = hashlib.sha1(image.encode("utf-8")).hexdigest()[:10]
     return f"ca-scan-{h}"
 
 
-def build_shell_script(ca_paths: List[str]) -> str:
-    ca_paths_arg = " ".join(ca_paths)
-    return f"""
+def build_init_shell_script() -> str:
+    """
+    Runs entirely inside the scanner image:
+
+    - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
+    - umoci unpack --rootless --image /work/oci:scan /work/root
+    - scan /work/root/rootfs/etc/... for certs
+    - write JSON array to /scan/output.json
+    """
+    return r"""
 set -e
-for base in {ca_paths_arg}; do
-  if [ -d "$base" ]; then
-    find "$base" -type f 2>/dev/null | while read f; do
-      sub=$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)
+
+IMAGE="${TARGET_IMAGE:?TARGET_IMAGE not set}"
+WORK="/work"
+OCI_DIR="$WORK/oci"
+ROOT_DIR="$WORK/root"
+OUT="/scan/output.json"
+
+mkdir -p "$OCI_DIR" "$ROOT_DIR"
+
+# We expect skopeo + umoci + openssl to be present in this image.
+if ! command -v skopeo >/dev/null 2>&1; then
+  echo "skopeo not found, writing empty JSON" >&2
+  echo "[]" > "$OUT"
+  exit 0
+fi
+
+if ! command -v umoci >/dev/null 2>&1; then
+  echo "umoci not found, writing empty JSON" >&2
+  echo "[]" > "$OUT"
+  exit 0
+fi
+
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "openssl not found, writing empty JSON" >&2
+  echo "[]" > "$OUT"
+  exit 0
+fi
+
+echo "Pulling image: $IMAGE" >&2
+# --insecure-policy: we rely on registry being trusted by infra
+skopeo copy \
+  --insecure-policy \
+  "docker://$IMAGE" \
+  "oci:$OCI_DIR:scan" >/dev/null 2>&1 || {
+    echo "skopeo copy failed for $IMAGE" >&2
+    echo "[]" > "$OUT"
+    exit 0
+  }
+
+echo "Unpacking image with umoci" >&2
+umoci unpack --rootless --image "$OCI_DIR:scan" "$ROOT_DIR" >/dev/null 2>&1 || {
+  echo "umoci unpack failed for $IMAGE" >&2
+  echo "[]" > "$OUT"
+  exit 0
+}
+
+ROOTFS="$ROOT_DIR/rootfs"
+
+echo "[" > "$OUT"
+FIRST=1
+
+scan_path() {
+  base="$1"
+  if [ -d "$ROOTFS$base" ]; then
+    find "$ROOTFS$base" -type f 2>/dev/null | while read f; do
+      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
       if [ -n "$sub" ]; then
-        printf '%s\\t%s\\n' "$f" "$sub"
+        rel="${f#$ROOTFS}"
+        if [ "$FIRST" -eq 0 ]; then echo "," >> "$OUT"; fi
+        FIRST=0
+        printf '{"path": "%s", "subject": "%s"}' "$rel" "$sub" >> "$OUT"
       fi
     done
   fi
+}
+
+for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates; do
+  scan_path "$base"
 done
+
+echo "]" >> "$OUT"
+
+# leave /work + /scan in place for main container
 """
 
 
@@ -81,9 +149,51 @@ def create_scan_job(
     batch: BatchV1Api,
     scan_ns: str,
     image: str,
-    shell_script: str,
+    scanner_image: str,
 ) -> str:
     name = make_job_name(image)
+    shell_script = build_init_shell_script()
+
+    # Volumes: shared work + scan data
+    work_vol = client.V1Volume(
+        name="work",
+        empty_dir=client.V1EmptyDirVolumeSource(),
+    )
+    scan_vol = client.V1Volume(
+        name="scan",
+        empty_dir=client.V1EmptyDirVolumeSource(),
+    )
+
+    init_container = client.V1Container(
+        name="extractor",
+        image=scanner_image,
+        command=["/bin/sh", "-c", shell_script],
+        env=[client.V1EnvVar(name="TARGET_IMAGE", value=image)],
+        volume_mounts=[
+            client.V1VolumeMount(name="work", mount_path="/work"),
+            client.V1VolumeMount(name="scan", mount_path="/scan"),
+        ],
+    )
+
+    main_container = client.V1Container(
+        name="dump",
+        image=scanner_image,
+        command=[
+            "/bin/sh",
+            "-c",
+            'if [ -f /scan/output.json ]; then cat /scan/output.json; else echo "[]"; fi',
+        ],
+        volume_mounts=[
+            client.V1VolumeMount(name="scan", mount_path="/scan"),
+        ],
+    )
+
+    pod_spec = client.V1PodSpec(
+        restart_policy="Never",
+        init_containers=[init_container],
+        containers=[main_container],
+        volumes=[work_vol, scan_vol],
+    )
 
     job = client.V1Job(
         api_version="batch/v1",
@@ -99,16 +209,7 @@ def create_scan_job(
                 metadata=client.V1ObjectMeta(
                     labels={"job-name": name, "app": "ca-scan"},
                 ),
-                spec=client.V1PodSpec(
-                    restart_policy="Never",
-                    containers=[
-                        client.V1Container(
-                            name="scan",
-                            image=image,
-                            command=["sh", "-c", shell_script],
-                        )
-                    ],
-                ),
+                spec=pod_spec,
             ),
         ),
     )
@@ -121,7 +222,7 @@ def wait_for_job(
     batch: BatchV1Api,
     scan_ns: str,
     job_name: str,
-    timeout_sec: int = 180,
+    timeout_sec: int = 600,
 ) -> str:
     """
     Return "Complete", "Failed", "Timeout".
@@ -137,6 +238,7 @@ def wait_for_job(
             return "Complete"
         if conds.get("Failed") == "True":
             return "Failed"
+
         time.sleep(2)
 
 
@@ -150,22 +252,20 @@ def get_job_pod_name(core: CoreV1Api, scan_ns: str, job_name: str) -> Optional[s
     return pods.items[0].metadata.name
 
 
-def get_pod_logs(core: CoreV1Api, scan_ns: str, pod_name: str) -> str:
-    return core.read_namespaced_pod_log(name=pod_name, namespace=scan_ns) or ""
-
-
-def delete_job(batch: BatchV1Api, scan_ns: str, job_name: str) -> None:
-    propagation = client.V1DeleteOptions(
-        propagation_policy="Foreground",
-    )
+def get_pod_logs(
+    core: CoreV1Api,
+    scan_ns: str,
+    pod_name: str,
+    container: str = "dump",
+) -> str:
     try:
-        batch.delete_namespaced_job(
-            name=job_name,
+        return core.read_namespaced_pod_log(
+            name=pod_name,
             namespace=scan_ns,
-            body=propagation,
-        )
+            container=container,
+        ) or ""
     except Exception:
-        pass
+        return ""
 
 
 def extract_certs_with_job(
@@ -173,45 +273,56 @@ def extract_certs_with_job(
     batch: BatchV1Api,
     scan_ns: str,
     image: str,
-    ca_paths: List[str],
+    scanner_image: str,
 ) -> List[Dict[str, str]]:
-    shell_script = build_shell_script(ca_paths)
-    job_name = create_scan_job(batch, scan_ns, image, shell_script)
+    job_name = create_scan_job(batch, scan_ns, image, scanner_image)
 
-    phase = "Unknown"
     phase = wait_for_job(batch, scan_ns, job_name)
-
     pod_name = get_job_pod_name(core, scan_ns, job_name)
+
     if not pod_name:
         print(f"WARN: no pod for job {job_name} (image {image})", file=sys.stderr)
         return []
 
-    logs = get_pod_logs(core, scan_ns, pod_name)
+    logs = get_pod_logs(core, scan_ns, pod_name, container="dump").strip()
 
     if phase != "Complete":
         print(f"WARN: scan job for image {image} ended with phase {phase}", file=sys.stderr)
         if logs:
             for line in logs.splitlines()[:20]:
                 print(f"  [scan-log] {line}", file=sys.stderr)
+        # keep jobs/pods for debugging; just return empty
         return []
 
-    certs: List[Dict[str, str]] = []
-    for line in logs.splitlines():
-        if "\t" not in line:
-            continue
-        path, subject = line.split("\t", 1)
-        certs.append({"path": path, "subject": subject})
-    return certs
+    if not logs:
+        return []
+
+    try:
+        data = json.loads(logs)
+        if not isinstance(data, list):
+            return []
+        certs: List[Dict[str, str]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            subj = item.get("subject")
+            if path and subj:
+                certs.append({"path": path, "subject": subj})
+        return certs
+    except Exception as e:
+        print(f"WARN: failed to parse JSON logs for image {image}: {e}", file=sys.stderr)
+        return []
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract CA certificates from K8S images using per-image Jobs (no kubectl).",
+        description="Extract CA certs from images using in-cluster Jobs (skopeo+umoci).",
     )
     parser.add_argument(
         "--scan-namespace",
-        default="ca-scanner",
-        help="Namespace to create scan Jobs in (default: ca-scanner)",
+        default=SCAN_NAMESPACE_DEFAULT,
+        help=f"Namespace to create scan Jobs in (default: {SCAN_NAMESPACE_DEFAULT})",
     )
     parser.add_argument(
         "--namespace",
@@ -219,25 +330,26 @@ def main() -> None:
         help="Limit discovery to a single namespace (default: all namespaces)",
     )
     parser.add_argument(
-        "--ca-path",
-        action="append",
-        dest="ca_paths",
-        help="Extra CA search path (can be repeated).",
+        "--scanner-image",
+        default=SCANNER_IMAGE_DEFAULT,
+        help=f"Image used as scanner (with skopeo+umoci+openssl). Default: {SCANNER_IMAGE_DEFAULT}",
     )
     args = parser.parse_args()
 
-    ca_paths = CA_PATHS_DEFAULT.copy()
-    if args.ca_paths:
-        ca_paths.extend(args.ca_paths)
-
     core, batch = load_k8s()
-
     images_info = get_images_and_namespaces(core, args.namespace)
 
     result = []
     for image, info in sorted(images_info.items(), key=lambda kv: kv[0]):
         ns_set = info["namespaces"]
-        certs = extract_certs_with_job(core, batch, args.scan_namespace, image, ca_paths)
+
+        certs = extract_certs_with_job(
+            core=core,
+            batch=batch,
+            scan_ns=args.scan_namespace,
+            image=image,
+            scanner_image=args.scanner_image,
+        )
 
         result.append(
             {
