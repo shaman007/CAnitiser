@@ -1,10 +1,8 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ca-scan-mail-20251126
+  name: ca-scan-cluster
   namespace: ca-scanner
-  labels:
-    ca-scan: ca-scan-mail
 spec:
   template:
     spec:
@@ -12,25 +10,68 @@ spec:
       restartPolicy: Never
       containers:
         - name: scanner
-          image: harbor.andreybondarenko.com/library/ca-scanner:latest
+          image: harbor.andreybondarenko.com/library/canitiser:latest
+          command: ["/bin/sh", "-c"]
           args:
-            - /bin/sh
-            - -c
             - |
-              # 1. run extractor
-              python /app/ca-nitiser.py --kubectl kubectl --runtime docker > /work/images.json
-              # 2. run analyser with policy from mounted ConfigMap
-              python /app/ca-analyse.py --images /work/images.json --policy /policy/policy.json > /work/report.json
-              # 3. apply CaImageReport from inside cluster (or post via API)
-              python /app/push-report.py \
-                --scan-name=ca-scan-mail \
-                --scan-namespace=mail \
-                --report-json=/work/report.json
+              set -e
+
+              # 1) discover images & run per-image Jobs
+              python /app/ca-nitiser-k8s.py > /work/images.json
+
+              # 2) analyse with policy
+              python /app/ca-analyse.py \
+                --images /work/images.json \
+                --policy /policy/policy.json \
+                > /work/report.json
+
+              # 3) create/update CaImageReport via API-server YAML
+              python - << 'EOF'
+              import json, subprocess
+              
+              NS = "ca-scanner"
+              SCAN_NAME = "ca-scan-cluster"
+              REPORT_PATH = "/work/report.json"
+              
+              with open(REPORT_PATH, "r", encoding="utf-8") as f:
+                  report = json.load(f)
+              
+              total = len(report)
+              green = sum(1 for x in report if x.get("status") == "GREEN")
+              yellow = sum(1 for x in report if x.get("status") == "YELLOW")
+              red = sum(1 for x in report if x.get("status") == "RED")
+              
+              yaml_text = f"""apiVersion: security.example.com/v1alpha1
+              kind: CaImageReport
+              metadata:
+                name: ca-scan-cluster-report
+                namespace: {NS}
+              spec:
+                scanRef:
+                  name: {SCAN_NAME}
+                  namespace: {NS}
+                summary:
+                  totalImages: {total}
+                  green: {green}
+                  yellow: {yellow}
+                  red: {red}
+                report: {json.dumps(report)}
+              """
+              
+              # still using kubectl HERE? if you really must not, replace this with python k8s client too.
+              subprocess.check_call(
+                  ["kubectl", "apply", "-f", "-"],
+                  input=yaml_text.encode("utf-8")
+              )
+              EOF
           volumeMounts:
             - name: policy
               mountPath: /policy
+            - name: work
+              mountPath: /work
       volumes:
         - name: policy
           configMap:
             name: ca-scan-policy
-            # chosen per-namespace or global by the controller
+        - name: work
+          emptyDir: {}

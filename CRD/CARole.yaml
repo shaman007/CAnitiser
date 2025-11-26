@@ -1,4 +1,3 @@
-# rbac-ca-scanner.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -6,28 +5,39 @@ metadata:
   namespace: ca-scanner
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: ca-scanner
+  namespace: ca-scanner
 rules:
+  # Read pods in this namespace (for job pods)
   - apiGroups: [""]
-    resources: ["pods", "namespaces"]
-    verbs: ["get", "list"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Read pod logs
   - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]        # exec uses "create" on the exec subresource
-  - apiGroups: ["security.andreybondarenko.com"]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Create/inspect/delete Jobs we spawn
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+
+  # (Optional) if your Python will also create CaImageReport via API
+  - apiGroups: ["security.example.com"]
     resources: ["caimagereports"]
     verbs: ["create", "update", "patch", "get", "list"]
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: ca-scanner
+  namespace: ca-scanner
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: ca-scanner
 subjects:
   - kind: ServiceAccount
