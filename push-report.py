@@ -12,6 +12,7 @@ PLURAL = "caimagereports"
 
 
 def load_k8s() -> CustomObjectsApi:
+    # in-cluster
     config.load_incluster_config()
     return client.CustomObjectsApi()
 
@@ -54,7 +55,6 @@ def upsert_report(
     }
 
     try:
-        # check if exists
         api.get_namespaced_custom_object(
             group=GROUP,
             version=VERSION,
@@ -70,7 +70,6 @@ def upsert_report(
             raise
 
     if exists:
-        # patch spec only
         api.patch_namespaced_custom_object(
             group=GROUP,
             version=VERSION,
@@ -98,19 +97,5 @@ def main() -> None:
     p.add_argument("--scan-namespace", required=True, help="Namespace of scan resource")
     args = p.parse_args()
 
-    with open(args.report-json, "r", encoding="utf-8") as f:
-        report = json.load(f)
-
-    api = load_k8s()
-    upsert_report(
-        api=api,
-        name=args.report-name,
-        namespace=args.report-namespace,
-        scan_name=args.scan-name,
-        scan_namespace=args.scan-namespace,
-        report=report,
-    )
-
-
-if __name__ == "__main__":
-    main()
+    with open(args.report_json, "r", encoding="utf-8") as f:
+        report = json.load
