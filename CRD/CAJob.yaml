@@ -19,6 +19,7 @@ spec:
               python /app/ca-nitiser-k8s.py \
                 --scan-namespace ca-scanner \
                 --namespace mail \
+                --scanner-image harbor.andreybondarenko.com/library/canister-base:latest \
                 > /work/images.json
 
               python /app/ca-analyse.py \

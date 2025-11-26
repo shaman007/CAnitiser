@@ -59,14 +59,6 @@ def make_job_name(image: str) -> str:
 
 
 def build_init_shell_script() -> str:
-    """
-    Runs entirely inside the scanner image:
-
-    - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
-    - umoci unpack --rootless --image /work/oci:scan /work/root
-    - scan /work/root/rootfs/etc/... for certs
-    - write JSON array to /scan/output.json
-    """
     return r"""
 set -e
 
@@ -78,7 +70,6 @@ OUT="/scan/output.json"
 
 mkdir -p "$OCI_DIR" "$ROOT_DIR"
 
-# We expect skopeo + umoci + openssl to be present in this image.
 if ! command -v skopeo >/dev/null 2>&1; then
   echo "skopeo not found, writing empty JSON" >&2
   echo "[]" > "$OUT"
@@ -98,7 +89,6 @@ if ! command -v openssl >/dev/null 2>&1; then
 fi
 
 echo "Pulling image: $IMAGE" >&2
-# --insecure-policy: we rely on registry being trusted by infra
 skopeo copy \
   --insecure-policy \
   "docker://$IMAGE" \
@@ -140,8 +130,6 @@ for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates; do
 done
 
 echo "]" >> "$OUT"
-
-# leave /work + /scan in place for main container
 """
 
 
@@ -284,21 +272,25 @@ def extract_certs_with_job(
         print(f"WARN: no pod for job {job_name} (image {image})", file=sys.stderr)
         return []
 
-    logs = get_pod_logs(core, scan_ns, pod_name, container="dump").strip()
-
+    logs = get_pod_logs(core, scan_ns, pod_name, container="dump")
+    
     if phase != "Complete":
-        print(f"WARN: scan job for image {image} ended with phase {phase}", file=sys.stderr)
-        if logs:
-            for line in logs.splitlines()[:20]:
-                print(f"  [scan-log] {line}", file=sys.stderr)
-        # keep jobs/pods for debugging; just return empty
+        ...
         return []
-
+    
+    logs = logs.strip()
     if not logs:
         return []
-
+    
+    # NEW: strip non-JSON header, keep from first '['
+    idx = logs.find("[")
+    if idx == -1:
+        return []
+    
+    json_text = logs[idx:].strip()
+    
     try:
-        data = json.loads(logs)
+        data = json.loads(json_text)
         if not isinstance(data, list):
             return []
         certs: List[Dict[str, str]] = []
