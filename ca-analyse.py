@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import sys
 from typing import Any, Dict, List
 
 
@@ -66,21 +65,26 @@ def main() -> None:
         namespaces = entry.get("namespaces", [])
         certs_raw = entry.get("certs", [])
 
-        groups = {
-            "green": [],
-            "red": [],
-            "not_matched": [],
-        }
+        flat_certs: List[Dict[str, str]] = []
 
         for cert in certs_raw:
             subj = cert.get("subject", "")
             cls = classify_cert(subj, whitelist, blacklist)
-            groups[cls].append(cert)
+            flat_certs.append(
+                {
+                    "path": cert.get("path", ""),
+                    "subject": subj,
+                    "classification": cls,
+                }
+            )
 
         # image-level status
-        if groups["red"]:
+        has_red = any(c["classification"] == "red" for c in flat_certs)
+        has_not_matched = any(c["classification"] == "not_matched" for c in flat_certs)
+
+        if has_red:
             status = "RED"
-        elif certs_raw and groups["not_matched"]:
+        elif flat_certs and has_not_matched:
             status = "YELLOW"
         else:
             # no certs OR all green
@@ -91,7 +95,7 @@ def main() -> None:
                 "image": image,
                 "namespaces": namespaces,
                 "status": status,
-                "certs": groups,
+                "certs": flat_certs,
             }
         )
 
