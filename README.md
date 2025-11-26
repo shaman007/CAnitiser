@@ -192,6 +192,12 @@ spec:
                 port:
                   number: 80
 ```
+### Non Kubernetes use
+
+## Scanner
+
+Since we are not in the K8S, we can use kubectl and local authenticaton. The test.sh script does the scan of the
+cluster, generates .json and fancy .html reports.
 
 ### Future Extensions
 
