@@ -6,8 +6,6 @@ from kubernetes import client, config
 from kubernetes.client import CustomObjectsApi
 from kubernetes.client.exceptions import ApiException
 
-
-# Adjust these to match your CRD
 GROUP = "security.andreybondarenko.com"
 VERSION = "v1alpha1"
 PLURAL = "caimagereports"
@@ -31,6 +29,10 @@ def upsert_report(
     yellow = sum(1 for x in report if x.get("status") == "YELLOW")
     red = sum(1 for x in report if x.get("status") == "RED")
 
+    sys.stderr.write(
+        f"[push-report] building spec: total={total}, green={green}, yellow={yellow}, red={red}\n"
+    )
+
     spec = {
         "scanRef": {
             "name": scan_name,
@@ -43,16 +45,6 @@ def upsert_report(
             "red": red,
         },
         "report": report,
-    }
-
-    body = {
-        "apiVersion": f"{GROUP}/{VERSION}",
-        "kind": "CaImageReport",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-        },
-        "spec": spec,
     }
 
     try:
@@ -86,6 +78,12 @@ def upsert_report(
         sys.stderr.write(
             f"[push-report] creating new {PLURAL}/{name} in {namespace}\n"
         )
+        body = {
+            "apiVersion": f"{GROUP}/{VERSION}",
+            "kind": "CaImageReport",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": spec,
+        }
         api.create_namespaced_custom_object(
             group=GROUP,
             version=VERSION,
@@ -94,18 +92,24 @@ def upsert_report(
             body=body,
         )
 
+    sys.stderr.write("[push-report] done\n")
+
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Create/patch CaImageReport from report.json")
-    p.add_argument("--report-json", required=True, help="Path to report.json (from ca-analyse.py)")
-    p.add_argument("--report-name", required=True, help="Name of CaImageReport object")
-    p.add_argument("--report-namespace", required=True, help="Namespace of CaImageReport object")
-    p.add_argument("--scan-name", required=True, help="Origin CaImageScan or logical scan name")
-    p.add_argument("--scan-namespace", required=True, help="Namespace of scan resource")
+    p.add_argument("--report-json", required=True)
+    p.add_argument("--report-name", required=True)
+    p.add_argument("--report-namespace", required=True)
+    p.add_argument("--scan-name", required=True)
+    p.add_argument("--scan-namespace", required=True)
     args = p.parse_args()
 
     with open(args.report_json, "r", encoding="utf-8") as f:
         report = json.load(f)
+
+    sys.stderr.write(
+        f"[push-report] loaded report with {len(report)} entries from {args.report_json}\n"
+    )
 
     api = load_k8s()
     upsert_report(
@@ -116,7 +120,6 @@ def main() -> None:
         scan_namespace=args.scan_namespace,
         report=report,
     )
-    sys.stderr.write("[push-report] done\n")
 
 
 if __name__ == "__main__":
