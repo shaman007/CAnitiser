@@ -1,0 +1,45 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ca-scan-policy
+  namespace: ca-scanner
+data:
+  policy.json: |
+    {
+      "whitelist": [
+        "Let's Encrypt",
+        "ISRG Root X1"
+      ],
+      "blacklist": [
+        "COMODO",
+        "Comodo",
+        "China",
+        "CNNIC",
+        "TeliaSonera",
+        "Telia Sonera"
+      ]
+    }
+# See example below for per-namespace policy
+#---
+#apiVersion: v1
+#kind: ConfigMap
+#metadata:
+#  name: ca-scan-policy
+#  namespace: mail
+#data:
+#  policy.json: |
+#    {
+#      "whitelist": [
+#        "Let's Encrypt",
+#        "ISRG Root X1"
+#      ],
+#      "blacklist": [
+#        "COMODO",
+#        "Comodo",
+#        "China",
+#        "CNNIC",
+#        "TeliaSonera",
+#        "Telia Sonera"
+#      ]
+#    }

@@ -1,0 +1,15 @@
+{
+  "whitelist": [
+    "Let's Encrypt",
+    "ISRG Root X1"
+  ],
+  "blacklist": [
+    "COMODO",
+    "Comodo",
+    "TeliaSonera",
+    "Telia Sonera",
+    "China",
+    "CNNIC"
+  ]
+}
+

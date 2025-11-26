@@ -1,0 +1,31 @@
+# rbac-ca-scanner.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ca-scanner
+  namespace: ca-scanner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ca-scanner
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["security.andreybondarenko.com"]
+    resources: ["caimagereports"]
+    verbs: ["create", "update", "patch", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ca-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ca-scanner
+subjects:
+  - kind: ServiceAccount
+    name: ca-scanner
+    namespace: ca-scanner
