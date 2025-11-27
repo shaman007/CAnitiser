@@ -281,7 +281,7 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
         for c in certs:
             path = c.get("path", "")
             subj = c.get("subject", "")
-            raw = (c.get("classification") or "YELLOW").upper()
+            raw =  c.get("classification")
 
             if raw == "GREEN":
                 cls_tag = "tag tag-green"
