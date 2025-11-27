@@ -104,8 +104,8 @@ ROOTFS="$ROOT_DIR/rootfs"
 scan_path() {
   base="$1"
   if [ -d "$ROOTFS$base" ]; then
-    find "$ROOTFS$base">/dev/null | while read f; do
-      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
+    find "$ROOTFS$base" 2>/dev/null | while read f; do
+      sub="$(openssl x509 -in "$f" -noout -subject>/dev/null || true)"
       if [ -n "$sub" ]; then
         rel="${f#$ROOTFS}"
         printf '%s\t%s\n' "$rel" "$sub"
