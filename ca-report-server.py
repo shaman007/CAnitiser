@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 from kubernetes import client, config
 from kubernetes.client import CustomObjectsApi
 
-GROUP = "security.andreybondarenko.com"
+GROUP = "canitiser.io"
 VERSION = "v1alpha1"
 PLURAL = "caimagereports"
 

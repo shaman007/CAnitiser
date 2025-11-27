@@ -44,7 +44,7 @@ The output is `report.json`.
 
 Scan results are stored in Kubernetes as `CaImageReport` custom resources.
 
-apiVersion: security.andreybondarenko.com/v1alpha1
+apiVersion: canitiser.io/v1alpha1
 kind: CaImageReport
 spec:
 scanRef:
@@ -69,7 +69,7 @@ classification: ...
 
 `push-report.py` creates or updates `CaImageReport` objects, requiring RBAC permissions for:
 
-apiGroups: ["security.andreybondarenko.com"]
+apiGroups: ["canitiser.io"]
 resources: ["caimagereports"]
 verbs: ["get", "list", "create", "patch"]
 

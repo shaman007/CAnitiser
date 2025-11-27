@@ -1,9 +1,9 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: caimagereports.security.andreybondarenko.com
+  name: caimagereports.canitiser.io
 spec:
-  group: security.andreybondarenko.com
+  group: canitiser.io
   names:
     kind: CaImageReport
     plural: caimagereports
