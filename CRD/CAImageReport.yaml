@@ -51,16 +51,20 @@ spec:
                         type: array
                         items:
                           type: string
+                      status:
+                        type: string
                       certs:
                         type: array
                         items:
                           type: object
+                          # allow extra fields, but explicitly include classification
+                          x-kubernetes-preserve-unknown-fields: true
                           properties:
                             path:
                               type: string
                             subject:
                               type: string
-                      status:
-                        type: string
-              # allow extra fields under spec if you add more later
+                            classification:
+                              type: string
+              # also preserve any future unknown fields under spec
               x-kubernetes-preserve-unknown-fields: true
