@@ -105,16 +105,10 @@ scan_path() {
   base="$1"
   if [ -d "$ROOTFS$base" ]; then
     find "$ROOTFS$base" -type f 2>/dev/null | while read f; do
-      subs="$(openssl crl2pkcs7 -nocrl -certfile "$f" 2>/dev/null | \
-              openssl pkcs7 -print_certs -noout -subject 2>/dev/null || true)"
-      if [ -n "$subs" ]; then
+      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
+      if [ -n "$sub" ]; then
         rel="${f#$ROOTFS}"
-        while IFS= read -r line; do
-          [ -z "$line" ] && continue
-          printf '%s\t%s\n' "$rel" "$line"
-        done <<EOF
-$subs
-EOF
+        printf '%s\t%s\n' "$rel" "$sub"
       fi
     done
   fi
