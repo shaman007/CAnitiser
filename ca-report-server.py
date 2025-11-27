@@ -277,15 +277,15 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
         body_parts.append("<thead><tr><th>Classification</th><th>Path</th><th>Subject</th></tr></thead>")
         body_parts.append("<tbody>")
         for c in certs:
-            cls_raw = c.get("classification", "not_matched").lower()
-            if cls_raw == "green":
-                cls = "GREEN"
+            raw = (c.get("classification") or "YELLOW").upper()
+            if raw not in ("GREEN", "YELLOW", "RED"):
+                raw = "YELLOW"
+
+            if raw == "GREEN":
                 cls_tag = "tag tag-green"
-            elif cls_raw == "red":
-                cls = "RED"
+            elif raw == "RED":
                 cls_tag = "tag tag-red"
             else:
-                cls = "YELLOW"
                 cls_tag = "tag tag-yellow"
 
             path = c.get("path", "")
@@ -293,7 +293,7 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
 
             body_parts.append(
                 "<tr>"
-                f"<td><span class='{cls_tag}'>{cls}</span></td>"
+                f"<td><span class='{cls_tag}'>{raw}</span></td>"
                 f"<td><code>{html.escape(path)}</code></td>"
                 f"<td><code>{html.escape(subj)}</code></td>"
                 "</tr>"
