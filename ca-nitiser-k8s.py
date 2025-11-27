@@ -105,14 +105,51 @@ scan_path() {
   base="$1"
   if [ -d "$ROOTFS$base" ]; then
     find "$ROOTFS$base" -type f 2>/dev/null | while read f; do
-      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
-      if [ -n "$sub" ]; then
-        rel="${f#$ROOTFS}"
-        printf '%s\t%s\n' "$rel" "$sub"
-      fi
+      # Skip files that clearly have no PEM certificates
+      grep -q "BEGIN CERTIFICATE" "$f" 2>/dev/null || continue
+
+      # Temporary directory for split certs
+      tmpdir="$(mktemp -d /tmp/cacerts.XXXXXX 2>/dev/null || mktemp -d)"
+
+      # Split file into individual cert PEMs: tmpdir/cert-0001.pem, cert-0002.pem, ...
+      awk '
+        /-----BEGIN CERTIFICATE-----/ {
+          in_cert = 1
+          idx++
+          fn = sprintf("%s/cert-%04d.pem", d, idx)
+          print > fn
+          next
+        }
+        /-----END CERTIFICATE-----/ {
+          if (in_cert) {
+            print >> fn
+            close(fn)
+            in_cert = 0
+          }
+          next
+        }
+        {
+          if (in_cert) {
+            print >> fn
+          }
+        }
+      ' d="$tmpdir" "$f"
+
+      # Extract subject from every split cert
+      for pem in "$tmpdir"/cert-*.pem; do
+        [ -f "$pem" ] || continue
+        sub="$(openssl x509 -in "$pem" -noout -subject 2>/dev/null || true)"
+        if [ -n "$sub" ]; then
+          rel="${f#$ROOTFS}"
+          printf '%s\t%s\n' "$rel" "$sub"
+        fi
+      done
+
+      rm -rf "$tmpdir"
     done
   fi
 }
+
 
 for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates /usr/share/ca-certificates/mozilla; do
   scan_path "$base"
