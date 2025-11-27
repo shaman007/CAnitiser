@@ -13,7 +13,8 @@ data:
         "Microsoft Corporation",
         "Google Trust Services LLC",
         "Amazon",
-        "Amazon Root CA 1"
+        "Amazon Root CA 1",
+        "The Go Daddy Group, Inc.",
       ],
       "blacklist": [
         "COMODO",

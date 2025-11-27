@@ -59,14 +59,6 @@ def make_job_name(image: str) -> str:
 
 
 def build_scan_shell_script() -> str:
-    """
-    Single-container job:
-      - skopeo copy docker://$TARGET_IMAGE oci:/work/oci:scan
-      - umoci unpack --rootless --image /work/oci:scan /work/root
-      - for each cert, print:  path<TAB>subject   to stdout
-
-    Progress goes to stderr, data to stdout.
-    """
     return r"""
 set -e
 
@@ -113,11 +105,16 @@ scan_path() {
   base="$1"
   if [ -d "$ROOTFS$base" ]; then
     find "$ROOTFS$base" -type f 2>/dev/null | while read f; do
-      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
-      if [ -n "$sub" ]; then
+      subs="$(openssl crl2pkcs7 -nocrl -certfile "$f" 2>/dev/null | \
+              openssl pkcs7 -print_certs -noout -subject 2>/dev/null || true)"
+      if [ -n "$subs" ]; then
         rel="${f#$ROOTFS}"
-        # DATA: path<TAB>subject  -> goes to stdout
-        printf '%s\t%s\n' "$rel" "$sub"
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          printf '%s\t%s\n' "$rel" "$line"
+        done <<EOF
+$subs
+EOF
       fi
     done
   fi
