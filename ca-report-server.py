@@ -260,6 +260,7 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
     body_parts.append("<h2>Certificates</h2>")
 
 
+
     for img in images:
         image_name = img.get("image", "")
         image_status = (img.get("status") or "GREEN").upper()
@@ -275,30 +276,24 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
             continue
 
         body_parts.append("<table>")
-        body_parts.append(
-            "<thead><tr><th>Classification</th><th>Path</th><th>Subject</th></tr></thead>"
-        )
+        body_parts.append("<thead><tr><th>Classification</th><th>Path</th><th>Subject</th></tr></thead>")
         body_parts.append("<tbody>")
         for c in certs:
-            # Prefer explicit per-cert classification if it is GREEN/YELLOW/RED,
-            # otherwise fall back to the image status.
-            raw_cls = (c.get("classification") or "").upper()
-            if raw_cls not in ("GREEN", "YELLOW", "RED"):
-                raw_cls = image_status
-
-            if raw_cls == "GREEN":
-                cls_tag = "tag tag-green"
-            elif raw_cls == "RED":
-                cls_tag = "tag tag-red"
-            else:
-                cls_tag = "tag tag-yellow"
-
             path = c.get("path", "")
             subj = c.get("subject", "")
+            raw = (c.get("classification") or "YELLOW").upper()
+
+            if raw == "GREEN":
+                cls_tag = "tag tag-green"
+            elif raw == "RED":
+                cls_tag = "tag tag-red"
+            else:
+                raw = "YELLOW"
+                cls_tag = "tag tag-yellow"
 
             body_parts.append(
                 "<tr>"
-                f"<td><span class='{cls_tag}'>{raw_cls}</span></td>"
+                f"<td><span class='{cls_tag}'>{raw}</span></td>"
                 f"<td><code>{html.escape(path)}</code></td>"
                 f"<td><code>{html.escape(subj)}</code></td>"
                 "</tr>"
