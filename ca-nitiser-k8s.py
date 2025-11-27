@@ -104,8 +104,8 @@ ROOTFS="$ROOT_DIR/rootfs"
 scan_path() {
   base="$1"
   if [ -d "$ROOTFS$base" ]; then
-    find "$ROOTFS$base" 2>/dev/null | while read f; do
-      sub="$(openssl x509 -in "$f" -noout -subject>/dev/null || true)"
+    find "$ROOTFS$base" -type f 2>/dev/null | while read f; do
+      sub="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
       if [ -n "$sub" ]; then
         rel="${f#$ROOTFS}"
         printf '%s\t%s\n' "$rel" "$sub"
@@ -114,7 +114,7 @@ scan_path() {
   fi
 }
 
-for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates; do
+for base in /etc/ssl/certs /etc/pki /usr/local/share/ca-certificates /usr/share/ca-certificates/mozilla; do
   scan_path "$base"
 done
 """
