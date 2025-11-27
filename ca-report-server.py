@@ -12,7 +12,7 @@ GROUP = "security.andreybondarenko.com"
 VERSION = "v1alpha1"
 PLURAL = "caimagereports"
 
-REPORT_NAMESPACE = os.getenv("REPORT_NAMESPACE")  # e.g., "ca-scanner" or empty for all namespaces
+REPORT_NAMESPACE = os.getenv("REPORT_NAMESPACE")
 LIST_ALL_NAMESPACES = REPORT_NAMESPACE in (None, "", "all")
 
 
@@ -142,7 +142,6 @@ def html_page(title: str, body: str) -> str:
 def render_index(api: CustomObjectsApi) -> str:
     reports = fetch_reports(api)
 
-    # compute global summary
     total_reports = len(reports)
     total_images = 0
     total_green = 0
@@ -161,12 +160,11 @@ def render_index(api: CustomObjectsApi) -> str:
         y = summary.get("yellow", 0)
         r = summary.get("red", 0)
 
-        total_reports and (total_images := total_images + total)
+        total_images += total
         total_green += g
         total_yellow += y
         total_red += r
 
-        # choose overall status from summary
         status = "GREEN"
         if r > 0:
             status = "RED"
@@ -215,7 +213,6 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
         f"| <a href='/'>Back to index</a></p>"
     )
 
-    # summary
     body_parts.append("<div class='summary-cards'>")
     body_parts.append(
         f"<div class='card'><div class='card-title'>Images</div>"
@@ -235,7 +232,6 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
     )
     body_parts.append("</div>")
 
-    # image table
     body_parts.append("<h2>Images</h2>")
     body_parts.append("<table>")
     body_parts.append(
@@ -261,7 +257,6 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
 
     body_parts.append("</tbody></table>")
 
-    # cert details
     body_parts.append("<h2>Certificates</h2>")
 
     for img in images:
@@ -275,22 +270,26 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
         )
 
         if not certs:
-            body_parts.append("<p>No certificates found (treated as GREEN).</p>")
+            body_parts.append("<p>No certificates found (treated as GREEN or empty).</p>")
             continue
 
         body_parts.append("<table>")
         body_parts.append("<thead><tr><th>Classification</th><th>Path</th><th>Subject</th></tr></thead>")
         body_parts.append("<tbody>")
         for c in certs:
-            cls = c.get("classification", "not_matched").upper()
+            cls_raw = c.get("classification", "not_matched").lower()
+            if cls_raw == "green":
+                cls = "GREEN"
+                cls_tag = "tag tag-green"
+            elif cls_raw == "red":
+                cls = "RED"
+                cls_tag = "tag tag-red"
+            else:
+                cls = "YELLOW"
+                cls_tag = "tag tag-yellow"
+
             path = c.get("path", "")
             subj = c.get("subject", "")
-
-            cls_tag = {
-                "GREEN": "tag tag-green",
-                "RED": "tag tag-red",
-                "NOT_MATCHED": "tag tag-yellow",
-            }.get(cls, "tag tag-yellow")
 
             body_parts.append(
                 "<tr>"
@@ -305,7 +304,7 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
 
 
 class Handler(BaseHTTPRequestHandler):
-    api = None  # will be set at startup
+    api = None
 
     def do_GET(self):
         try:
@@ -318,7 +317,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._respond(200, html_str)
                 return
 
-            # /report/<namespace>/<name>
             if path.startswith("/report/"):
                 parts = path.split("/")
                 if len(parts) >= 4:
@@ -345,7 +343,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(os.getenv("PORT", "8080"))
     server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"CA report UI listening on 0.0.0.0:{port}, namespace={REPORT_NAMESPACE or 'all'}", flush=True)
+    print(
+        f"CA report UI listening on 0.0.0.0:{port}, namespace={REPORT_NAMESPACE or 'all'}",
+        flush=True,
+    )
     server.serve_forever()
 
 

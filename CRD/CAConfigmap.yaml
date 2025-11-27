@@ -9,7 +9,11 @@ data:
     {
       "whitelist": [
         "Let's Encrypt",
-        "ISRG Root X1"
+        "ISRG Root X1",
+        "Microsoft Corporation",
+        "Google Trust Services LLC",
+        "Amazon",
+        "Amazon Root CA 1"
       ],
       "blacklist": [
         "COMODO",
@@ -17,7 +21,13 @@ data:
         "China",
         "CNNIC",
         "TeliaSonera",
-        "Telia Sonera"
+        "Telia Sonera",
+        "WoSign",
+        "StartCom",
+        "DigiNotar",
+        "Symantec",
+        "GeoTrust",
+        "Chunghwa"
       ]
     }
 # See example below for per-namespace policy

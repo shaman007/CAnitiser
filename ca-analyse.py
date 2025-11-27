@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from typing import Any, Dict, List
 
 
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"[ca-analyse] Failed to parse JSON {path}: {e}", file=sys.stderr)
+            raise
 
 
 def classify_cert(
@@ -78,7 +83,6 @@ def main() -> None:
                 }
             )
 
-        # image-level status
         has_red = any(c["classification"] == "red" for c in flat_certs)
         has_not_matched = any(c["classification"] == "not_matched" for c in flat_certs)
 
