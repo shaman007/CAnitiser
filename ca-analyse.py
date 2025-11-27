@@ -14,26 +14,33 @@ def load_json(path: str) -> Any:
             raise
 
 
+def normalize_subject(subject: str) -> str:
+    s = subject.strip()
+    if s.lower().startswith("subject="):
+        s = s[len("subject="):].lstrip()
+    return s.lower()
+
+
 def classify_cert(
     subject: str,
     whitelist: List[str],
     blacklist: List[str],
 ) -> str:
     """
-    Return: 'red', 'green', or 'not_matched'
+    Return exact labels: 'RED', 'GREEN', or 'YELLOW'
     - blacklist wins over whitelist if both match
     """
-    s = subject.lower()
+    s = normalize_subject(subject)
 
     for pat in blacklist:
         if pat.lower() in s:
-            return "red"
+            return "RED"
 
     for pat in whitelist:
         if pat.lower() in s:
-            return "green"
+            return "GREEN"
 
-    return "not_matched"
+    return "YELLOW"
 
 
 def main() -> None:
@@ -83,15 +90,15 @@ def main() -> None:
                 }
             )
 
-        has_red = any(c["classification"] == "red" for c in flat_certs)
-        has_not_matched = any(c["classification"] == "not_matched" for c in flat_certs)
+        has_red = any(c["classification"] == "RED" for c in flat_certs)
+        has_yellow = any(c["classification"] == "YELLOW" for c in flat_certs)
 
         if has_red:
             status = "RED"
-        elif flat_certs and has_not_matched:
+        elif flat_certs and has_yellow:
             status = "YELLOW"
         else:
-            # no certs OR all green
+            # no certs OR all GREEN
             status = "GREEN"
 
         report.append(
