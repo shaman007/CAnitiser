@@ -282,20 +282,20 @@ def render_single_report(api: CustomObjectsApi, namespace: str, name: str) -> st
             path = c.get("path", "")
             subj = c.get("subject", "")
             raw =  c.get("classification")
+            cls_tag = "tag tag-yellow"
 
             if raw == "GREEN":
                 cls_tag = "tag tag-green"
             elif raw == "RED":
                 cls_tag = "tag tag-red"
-            else:
-                raw = "YELLOW"
-                cls_tag = "tag tag-yellow"
+
 
             body_parts.append(
                 "<tr>"
                 f"<td><span class='{cls_tag}'>{raw}</span></td>"
                 f"<td><code>{html.escape(path)}</code></td>"
                 f"<td><code>{html.escape(subj)}</code></td>"
+                f"<td><code>{html.escape(raw)}</code></td>"
                 "</tr>"
             )
         body_parts.append("</tbody></table>")
