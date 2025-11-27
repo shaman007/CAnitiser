@@ -14,15 +14,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # --- kubectl CLI (in-cluster auth or external kubeconfig) ---
-ARG KUBECTL_VERSION=latest
-RUN set -eux; \
-    if [ "$KUBECTL_VERSION" = "latest" ]; then \
-      KVER="$(curl -L -s https://dl.k8s.io/release/stable.txt)"; \
-    else \
-      KVER="v${KUBECTL_VERSION}"; \
-    fi; \
-    curl -L "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl && \
-    chmod +x /usr/local/bin/kubectl
+
 
 # If you ever decide to use extra Python libs, add a requirements.txt and uncomment:
 # COPY requirements.txt .

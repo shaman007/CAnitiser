@@ -20,7 +20,7 @@ spec:
               echo "[controller] running ca-nitiser-k8s" >&2
               python /app/ca-nitiser-k8s.py \
                 --scan-namespace ca-scanner \
-                --scanner-image harbor.andreybondarenko.com/library/canister-base:latest \
+                --scanner-image harbor.andreybondarenko.com/library/canitiser-base:latest \
                 > /work/images.json
 
               echo "[controller] images.json:" >&2
