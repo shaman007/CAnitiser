@@ -13,6 +13,7 @@ CONFIG = {
         "/etc/ssl/certs",
         "/etc/pki",
         "/usr/local/share/ca-certificates",
+        "/usr/share/ca-certificates/mozilla",
     ],
 }
 
@@ -79,15 +80,49 @@ def extract_certs(runtime_cmd: List[str], image: str, ca_paths: List[str]) -> Li
     """
     ca_paths_arg = " ".join(ca_paths)
 
-    script = f"""
+    script = f"""#!/bin/sh
 set -e
+
 for base in {ca_paths_arg}; do
   if [ -d "$base" ]; then
     find "$base" -type f 2>/dev/null | while read f; do
-      sub=$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)
-      if [ -n "$sub" ]; then
-        printf '%s\\t%s\\n' "$f" "$sub"
-      fi
+      # Fast skip: no PEM blocks
+      grep -q "BEGIN CERTIFICATE" "$f" 2>/dev/null || continue
+
+      tmpdir="$(mktemp -d /tmp/cacerts.XXXXXX 2>/dev/null || mktemp -d)"
+
+      awk '
+        /-----BEGIN CERTIFICATE-----/ {{
+          in_cert = 1
+          idx++
+          fn = sprintf("%s/cert-%04d.pem", d, idx)
+          print > fn
+          next
+        }}
+        /-----END CERTIFICATE-----/ {{
+          if (in_cert) {{
+            print >> fn
+            close(fn)
+            in_cert = 0
+          }}
+          next
+        }}
+        {{
+          if (in_cert) {{
+            print >> fn
+          }}
+        }}
+      ' d="$tmpdir" "$f"
+
+      for pem in "$tmpdir"/cert-*.pem; do
+        [ -f "$pem" ] || continue
+        sub="$(openssl x509 -in "$pem" -noout -subject 2>/dev/null || true)"
+        if [ -n "$sub" ]; then
+          printf '%s\\t%s\\n' "$f" "$sub"
+        fi
+      done
+
+      rm -rf "$tmpdir"
     done
   fi
 done
